@@ -2,26 +2,27 @@
 fastapi==0.116.1
 uvicorn==0.35.0
 
-# === LangChain core and tools ===
+# === LangChain ecosystem (aligned versions)
 langchain==0.3.26
 langchain-core==0.3.72
 langchain-community==0.3.27
-langchain-google-genai==0.0.8
+langchain-google-genai==2.1.8  
 
-# === Google Generative AI (compatible versions)
-google-generativeai==0.3.2
-google-ai-generativelanguage==0.6.9
+# === Google Gemini embeddings
+google-generativeai==0.8.5
+google-ai-generativelanguage==0.6.15  
 
-# === Pinecone (older compatible client)
+# === Pinecone
 pinecone-client==2.2.2
+langchain-pinecone==0.2.11
 
-# === Vector DB (FAISS fallback)
+# === Vector store (optional fallback)
 faiss-cpu==1.11.0.post1
 
-# === Document loaders
+# === PDF and DOCX loaders
 pypdf==5.8.0
 python-docx==1.2.0
 
-# === Utils
+# === Token utils & .env
 tiktoken==0.9.0
 python-dotenv==1.1.1
