@@ -6,11 +6,11 @@ uvicorn==0.35.0
 langchain==0.3.26
 langchain-core==0.3.72
 langchain-community==0.3.27
-langchain-google-genai==2.1.8  
+langchain-google-genai==2.1.7  # Downgraded to work with google-ai-generativelanguage==0.6.15  
 
 # === Google Gemini embeddings
-google-generativeai>=0.8.6  # Updated to support newer google-ai-generativelanguage
-google-ai-generativelanguage>=0.6.18,<0.7.0
+google-generativeai==0.8.5
+google-ai-generativelanguage==0.6.15  # Reverted to work with available packages
 
 # === Pinecone
 pinecone-client==2.2.2
