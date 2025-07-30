@@ -1,10 +1,62 @@
-venv/
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
+*.egg-info/
+*.egg
 *.pyo
 *.pyd
+
+# Env files
 .env
+.env.*
+
+# VS Code
+.vscode/
+
+# Mac OS
 .DS_Store
 
-*.env
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
 
+# Logs
+*.log
+
+# Render build cache
+.render/
+
+# Byte-compiled files
+*.pyc
+
+# Jupyter Notebook checkpoints (if any)
+.ipynb_checkpoints/
+
+# Cache and compiled output
+.cache/
+build/
+dist/
+
+# Pytest
+.cache/
+.pytest_cache/
+
+# mypy
+.mypy_cache/
+
+# Coverage reports
+htmlcov/
+coverage.xml
+*.cover
+*.py,cover
+.cache/
+
+# FAISS, Chroma or Pinecone index files (if stored locally)
+index/
+*.faiss
+*.chroma
+
+# Node (if frontend is present in same repo)
+node_modules/
