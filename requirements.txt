@@ -18,7 +18,7 @@ pinecone-client~=4.1.0
 langchain-pinecone~=0.2.11 # Adjusted based on available versions to fix previous error
 
 # === Vector store (optional fallback, needed if you use FAISS)
-faiss-cpu~=1.17.0
+faiss-cpu~=1.11.0
 
 # === PDF and DOCX loaders
 pypdf~=4.0.0
