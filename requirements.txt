@@ -6,19 +6,22 @@ uvicorn==0.35.0
 langchain==0.3.26
 langchain-core==0.3.72
 langchain-community==0.3.27
-langchain-google-genai==2.1.8
+langchain-google-genai==0.0.8
 
-# === Google Generative AI - Gemini models ===
-google-generativeai==0.8.0
-google-ai-generativelanguage==0.6.18
+# === Google Generative AI (compatible versions)
+google-generativeai==0.3.2
+google-ai-generativelanguage==0.6.9
 
-# === Vector DB (FAISS) ===
+# === Pinecone (older compatible client)
+pinecone-client==2.2.2
+
+# === Vector DB (FAISS fallback)
 faiss-cpu==1.11.0.post1
 
-# === Document loaders ===
+# === Document loaders
 pypdf==5.8.0
 python-docx==1.2.0
 
-# === Utility packages ===
+# === Utils
 tiktoken==0.9.0
 python-dotenv==1.1.1
