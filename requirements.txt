@@ -2,29 +2,28 @@
 fastapi~=0.116.0
 uvicorn~=0.35.0
 
-# === LangChain ecosystem (using recent compatible versions)
-# Let pip determine the best compatible versions for these to avoid conflicts
+# === LangChain ecosystem (let pip find the latest compatible versions for these)
+# Remove specific pins here if you encounter resolution issues.
+# Pip will try to find the newest versions that work together.
 langchain
 langchain-core
 langchain-community
 langchain-google-genai
 
-# === Google Gemini dependencies (let pip resolve compatible versions)
+# === Google Gemini dependencies (let pip find the latest compatible versions)
 google-generativeai
-# google-ai-generativelanguage # Usually installed as a dependency of google-generativeai,
-                               # so you might not need to list it explicitly.
 
-# === Pinecone (recent stable versions)
+# === Pinecone (recent stable versions for good compatibility)
 pinecone-client~=4.1.0
-langchain-pinecone~=0.3.0
+langchain-pinecone~=0.2.11 # Adjusted based on available versions to fix previous error
 
-# === Vector store (optional fallback)
-faiss-cpu~=1.17.0 # Updated to a more recent stable version
+# === Vector store (optional fallback, needed if you use FAISS)
+faiss-cpu~=1.17.0
 
 # === PDF and DOCX loaders
-pypdf~=4.0.0 # Updated to a more recent stable version
+pypdf~=4.0.0
 python-docx~=1.2.0
 
 # === Token utils & .env
-tiktoken~=0.7.0 # Updated to a more recent stable version
-python-dotenv~=1.0.0 # Updated to a more recent stable version
+tiktoken~=0.7.0
+python-dotenv~=1.0.0
