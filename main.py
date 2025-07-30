@@ -6,6 +6,8 @@ import asyncio
 import requests
 import logging
 logger = logging.getLogger(__name__)
+from pypdf import PdfReader
+import io
 
 class QueryRequest(BaseModel):
     documents : str
@@ -58,6 +60,27 @@ async def download_file(url: str) -> bytes:
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
             detail="Download Failed"
         )
+        
+async def pdf_parser(pdf_bytes: bytes)->str:
+    logger.info("Attempting to parse PDF bytes into text.")
+    text_content = ""
+    
+    try:
+        reader = await asyncio.to_thread(PdfReader, io.BytesIO(pdf_bytes))
+        
+        for page_no, page in enumerate(reader.pages):
+            page_text = await asyncio.to_thread(page.extract_text) or ""
+            text_content += page_text
+        logger.info(f"Successfully parsed PDF. Extracted {len(text_content)} characters.")
+        return text_content
+    
+    except Exception as e:
+        logger.error(f"Error parsing PDF: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to parse PDF: {e}"
+        )
+        
 
 @app.post("/api/v1/hackrx/run", response_model=QueryResponse)
 async def run_submission(
