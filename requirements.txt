@@ -24,6 +24,6 @@ faiss-cpu~=1.11.0
 pypdf~=4.0.0
 python-docx~=1.2.0
 
-# === Token utils & .env
-tiktoken~=0.7.0
+# === Token utils & .env (using specific version to avoid build issues)
+tiktoken==0.5.2  # Using older version with pre-compiled wheels
 python-dotenv~=1.0.0
