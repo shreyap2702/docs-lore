@@ -9,8 +9,8 @@ langchain-community==0.3.27
 langchain-google-genai>=2.1.0,<3.0.0  # Loosened version constraint
 
 # === Google Gemini embeddings
-google-generativeai==0.8.5
-google-ai-generativelanguage>=0.6.18,<0.7.0  # Updated to meet langchain-google-genai requirements
+google-generativeai==0.8.4  # Downgraded to be compatible with google-ai-generativelanguage==0.6.15
+google-ai-generativelanguage==0.6.15  # Pinned to exact version to avoid conflicts
 
 # === Pinecone
 pinecone-client==2.2.2
