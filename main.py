@@ -1,6 +1,11 @@
 from fastapi import FastAPI, Depends, HTTPException, status
 from pydantic import BaseModel
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
+import asyncio
+import requests
+import logging
+logger = logging.getLogger(__name__)
 
 class QueryRequest(BaseModel):
     documents : str
@@ -21,6 +26,38 @@ async def verify_token(credentials: HTTPAuthorizationCredentials = Depends(secur
             detail="Invalid or missing authentication token"
         )
     return True
+
+async def download_file(url: str) -> bytes:
+    """
+    Downloads a file from a given URL and returns its content as bytes.
+    """
+    logger.info(f"Downloading from: {url}")
+
+    try:
+        response = await asyncio.to_thread(
+            requests.get,
+            url,
+            timeout=30
+        )
+        response.raise_for_status()
+        content = response.content
+        logger.info(f"Downloaded {len(content)} bytes successfully")
+
+        return content
+
+    except requests.exceptions.Timeout:
+        logger.error(f"Download timed out for {url}")
+        raise HTTPException(
+            status_code=status.HTTP_408_REQUEST_TIMEOUT, 
+            detail="Download timed out"
+        )
+
+    except Exception as e:
+        logger.error(f"Download failed for {url}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
+            detail="Download Failed"
+        )
 
 @app.post("/api/v1/hackrx/run", response_model=QueryResponse)
 async def run_submission(
