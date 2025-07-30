@@ -10,7 +10,7 @@ langchain-google-genai==2.1.7  # Downgraded to work with google-ai-generativelan
 
 # === Google Gemini embeddings
 google-generativeai==0.8.5
-google-ai-generativelanguage==0.6.15  # Reverted to work with available packages
+google-ai-generativelanguage>=0.6.18,<0.7.0  # Updated to meet langchain-google-genai requirements
 
 # === Pinecone
 pinecone-client==2.2.2
