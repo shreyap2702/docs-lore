@@ -59,18 +59,29 @@ else:
 vectorstore = PineconeVectorStore(index=pc.Index(PINECONE_INDEX_NAME), embedding=embeddings)
 
 rag_prompt_template = ChatPromptTemplate.from_template("""
-    You are an intelligent query-retrieval system. Answer the user's question ONLY based on the following context.
-    If the answer is not found in the context, clearly state "The provided document does not contain information to answer this question." Do not make up answers.
-
-    For each answer, explicitly state which part(s) of the provided context helped you formulate the answer (e.g., "Based on Clause X...", or "As per the section on Y...").
-
-    Context:
-    {context}
-
-    Question: {input}
-
-    Answer:
-    """)
+-    You are an intelligent query-retrieval system. Answer the user's question ONLY based on the following context.
+-    If the answer is not found in the context, clearly state "The provided document does not contain information to answer this question." Do not make up answers.
+-
+-    For each answer, explicitly state which part(s) of the provided context helped you formulate the answer (e.g., "Based on Clause X...", or "As per the section on Y...").
+-
+-    Context:
+-    {context}
+-
+-    Question: {question}
+-
+-    Answer:
++    You are a precise and concise query-retrieval system. Provide very short and direct answers.
++    Answer the user's question ONLY based on the following context.
++    If the answer is not found in the context, clearly state "The provided document does not contain information to answer this question." Do not make up answers.
++    Do NOT include any citations or references to specific sections/clauses from the context in your answer.
++
++    Context:
++    {context}
++
++    Question: {question}
++
++    Answer:
+     """)
 
 document_chain = create_stuff_documents_chain(llm, rag_prompt_template)
 
