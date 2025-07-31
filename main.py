@@ -11,6 +11,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain.chains.combine_documents import create_stuff_documents_chain
 from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
+from langchain_core.runnables import RunnableLambda
 from langchain.chains import create_retrieval_chain
 from pypdf import PdfReader
 import mimetypes
@@ -38,7 +39,7 @@ logger = logging.getLogger(__name__)
 processed_documents_cache = set()
 
 # --- Global Initializations ---
-text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
+text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
 
 llm = ChatGoogleGenerativeAI(model="models/gemini-1.5-flash-latest", temperature=0.2, google_api_key=GOOGLE_API_KEY)
 embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=GOOGLE_API_KEY)
@@ -56,37 +57,36 @@ if PINECONE_INDEX_NAME not in pc.list_indexes().names():
 else:
     logger.info(f"Pinecone index '{PINECONE_INDEX_NAME}' already exists.")
 
-vectorstore = PineconeVectorStore(index=pc.Index(PINECONE_INDEX_NAME), embedding=embeddings)
+vectorstore = PineconeVectorStore(index=pc.Index(PINECONE_INDEX_NAME), embedding=embeddings, namespace="hackrx-2025")
 
+# Fixed prompt template to use 'input' instead of 'question'
 rag_prompt_template = ChatPromptTemplate.from_template("""
--    You are an intelligent query-retrieval system. Answer the user's question ONLY based on the following context.
--    If the answer is not found in the context, clearly state "The provided document does not contain information to answer this question." Do not make up answers.
--
--    For each answer, explicitly state which part(s) of the provided context helped you formulate the answer (e.g., "Based on Clause X...", or "As per the section on Y...").
--
--    Context:
--    {context}
--
--    Question: {question}
--
--    Answer:
-+    You are a precise and concise query-retrieval system. Provide very short and direct answers.
-+    Answer the user's question ONLY based on the following context.
-+    If the answer is not found in the context, clearly state "The provided document does not contain information to answer this question." Do not make up answers.
-+    Do NOT include any citations or references to specific sections/clauses from the context in your answer.
-+
-+    Context:
-+    {context}
-+
-+    Question: {question}
-+
-+    Answer:
-     """)
+    You are a comprehensive and detailed question-answering system for any type of document content.
+    Your goal is to provide thorough, accurate answers that include all relevant details from the provided context.
+    Answer the user's question based on the following context, providing complete information including:
+    - Specific details, numbers, dates, and time periods
+    - Conditions, requirements, and criteria
+    - Limitations, restrictions, and caps
+    - Procedures, processes, and steps
+    - Definitions, classifications, and categories
+    - Any other relevant factual information present in the context
+    If the context is empty or does not contain relevant information to answer the question, clearly state "The provided document does not contain information to answer this question."
+    If the context contains relevant information, provide a detailed answer that captures all important details from the source material.
+    Do not make up answers or include information not present in the context.
+    Do NOT include any introductory phrases, citations, or references to specific sections/clauses from the context in your answer.
+    For yes/no questions, provide a detailed explanation with all relevant conditions and requirements.
+ 
+
+    Context:
+    {context}
+
+    Question: {input} 
+
+    Answer:
+    """)
 
 document_chain = create_stuff_documents_chain(llm, rag_prompt_template)
-
-# Fixed RAG chain configuration
-retriever = vectorstore.as_retriever(search_kwargs={"k": 5})
+retriever = vectorstore.as_retriever(search_kwargs={"k": 8, "score_threshold": 0.4})
 rag_chain = create_retrieval_chain(retriever, document_chain)
 
 # --- End Global Initializations ---
@@ -304,24 +304,29 @@ async def run_submission(request: QueryRequest, auth: bool = Depends(verify_toke
         answers = []
         for question in request.questions:
             logger.info(f"Answering question: {question}")
-            
-            # Validate question input
+
+    # Validate question input
             clean_question = validate_text_input(question)
             if not clean_question:
                 logger.warning(f"Empty or invalid question: {question}")
                 answers.append("Invalid or empty question provided.")
                 continue
-            
-            # Fixed: Use the correct input format for the RAG chain
+
             try:
-                result = await rag_chain.ainvoke({"input": clean_question})
-                # The result from create_retrieval_chain is a dict with 'answer' key
-                answer = result.get("answer", str(result)) if isinstance(result, dict) else str(result)
+                # Debug: Check what documents are being retrieved
+                docs = await asyncio.to_thread(retriever.get_relevant_documents, clean_question)
+                logger.info(f"Retrieved {len(docs)} documents for question: {clean_question}")
+                if docs:
+                    logger.info(f"First doc preview: {docs[0].page_content[:200]}...")
+                
+                result = await rag_chain.ainvoke({"input": clean_question})  # Use 'input' key
+                answer = result.get("answer", "No answer found")  # Extract the 'answer' key from the result dict
                 answers.append(answer)
                 logger.info(f"Generated answer for '{question}': {answer[:100]}...")
             except Exception as e:
                 logger.error(f"Error processing question '{question}': {e}")
                 answers.append(f"Error processing question: {str(e)}")
+
 
         return QueryResponse(answers=answers)
 
