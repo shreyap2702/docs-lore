@@ -23,39 +23,47 @@ import email
 from email import policy
 from dotenv import load_dotenv
 
+# --- 1. Load Environment Variables ---
 load_dotenv()
-
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 PINECONE_ENVIRONMENT = os.getenv("PINECONE_ENVIRONMENT")
-PINECONE_INDEX_NAME = os.getenv("PINECONE_INDEX_NAME", "hackathon-policy-docs")
+PINECONE_INDEX_NAME = os.getenv("PINECONE_INDEX_NAME", "hackathon-policy-docs") # Get from .env, with default
 
+# --- 2. Configure Logging ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-
+# --- 3. Global Initializations (These run once at app startup) ---
+# Simple In-Memory Cache for Processed Documents
 processed_documents_cache = set()
 
+# Text Splitter (Tunable parameters: chunk_size, chunk_overlap)
 text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
 
+# LLM and Embeddings with API key
 llm = ChatGoogleGenerativeAI(model="gemini-pro", temperature=0.2, google_api_key=GOOGLE_API_KEY)
 embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=GOOGLE_API_KEY)
 
+# Pinecone client
 pc = Pinecone(api_key=PINECONE_API_KEY, environment=PINECONE_ENVIRONMENT)
 
+# Create Pinecone index if it doesn't exist
 if PINECONE_INDEX_NAME not in pc.list_indexes().names():
     pc.create_index(
         name=PINECONE_INDEX_NAME,
-        dimension=768,
+        dimension=768, # Dimension for "models/embedding-001" is typically 768
         metric="cosine",
-        spec=ServerlessSpec(cloud='aws', region='us-west-2')
+        spec=ServerlessSpec(cloud='aws', region='us-west-2') # Adjust as per your Pinecone plan
     )
     logger.info(f"Created new Pinecone index: {PINECONE_INDEX_NAME}")
 else:
     logger.info(f"Pinecone index '{PINECONE_INDEX_NAME}' already exists.")
 
+# Pinecone Vector Store (using the global Pinecone client and embeddings)
 vectorstore = PineconeVectorStore(index=pc.Index(PINECONE_INDEX_NAME), embedding=embeddings)
 
+# RAG Prompt Template (Tunable - experiment with phrasing)
 rag_prompt_template = ChatPromptTemplate.from_template("""
     You are an intelligent query-retrieval system. Answer the user's question ONLY based on the following context.
     If the answer is not found in the context, clearly state "The provided document does not contain information to answer this question." Do not make up answers.
@@ -70,13 +78,16 @@ rag_prompt_template = ChatPromptTemplate.from_template("""
     Answer:
     """)
 
+# Document combining chain
 document_chain = create_stuff_documents_chain(llm, rag_prompt_template)
 
+# Full RAG chain (Retrieval 'k' value adjusted here for better context)
 rag_chain = (
-    {"context": vectorstore.as_retriever(search_kwargs={"k": 3}), "input": RunnablePassthrough()}
+    {"context": vectorstore.as_retriever(search_kwargs={"k": 5}), "input": RunnablePassthrough()} # K changed from 3 to 5
     | document_chain
     | StrOutputParser()
 )
+# --- End Global Initializations ---
 
 app = FastAPI(title="LLM Query-Retrieval System")
 
@@ -181,6 +192,17 @@ async def parse_email(data: bytes) -> str:
         logger.error(f"Email parsing error: {e}", exc_info=True)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Email parsing error: {e}")
 
+
+def chunk_text(text: str, source_name: str) -> list[Document]:
+    # text_splitter is already defined globally
+    chunks = text_splitter.create_documents([text])
+    for chunk in chunks:
+        chunk.metadata["source"] = source_name
+    return chunks
+
+
+# --- Removed get_embeddings, store_chunks_in_pinecone, get_retrieval_chain functions ---
+# Their logic is now handled by global initializations and direct calls in run_submission
 
 @app.post("/api/v1/hackrx/run", response_model=QueryResponse)
 async def run_submission(request: QueryRequest, auth: bool = Depends(verify_token)):
