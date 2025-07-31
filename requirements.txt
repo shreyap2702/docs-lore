@@ -1,29 +1,29 @@
 # === FastAPI server ===
-fastapi~=0.116.0
-uvicorn~=0.35.0
+fastapi==0.116.1
+uvicorn==0.35.0
 
-# === LangChain ecosystem (let pip find the latest compatible versions for these)
-# Remove specific pins here if you encounter resolution issues.
-# Pip will try to find the newest versions that work together.
-langchain
-langchain-core
-langchain-community
-langchain-google-genai
+# === LangChain ecosystem (Strictly pinned to compatible 0.3.x series)
+langchain==0.3.26
+langchain-core==0.3.72
+langchain-community==0.3.27
+langchain-google-genai==2.0.0
 
-# === Google Gemini dependencies (let pip find the latest compatible versions)
-google-generativeai
+# === Google Gemini dependencies (Strictly pinned for compatibility with langchain-google-genai 2.0.0)
+google-generativeai==0.7.2
+google-api-core==2.11.0
+protobuf==4.25.3
 
-# === Pinecone (recent stable versions for good compatibility)
-pinecone-client~=4.1.0
-langchain-pinecone~=0.2.11 # Adjusted based on available versions to fix previous error
+# === Pinecone (Strictly pinned for compatibility with langchain-pinecone 0.2.11)
+pinecone-client==2.2.4
+langchain-pinecone==0.2.11
 
-# === Vector store (optional fallback, needed if you use FAISS)
-faiss-cpu~=1.11.0
+# === Vector store (optional fallback)
+faiss-cpu==1.11.0.post1
 
 # === PDF and DOCX loaders
-pypdf~=4.0.0
-python-docx~=1.2.0
+pypdf==4.0.0
+python-docx==1.2.0
 
-# === Token utils & .env (using compatible version)
-tiktoken>=0.7.0,<1.0.0  # Compatible with langchain-openai requirements
-python-dotenv~=1.0.0
+# === Token utils & .env
+tiktoken==0.7.0
+python-dotenv==1.0.0
