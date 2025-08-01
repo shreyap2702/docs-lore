@@ -109,4 +109,7 @@ logs/
 *.tmp
 *.temp
 
+# Database info files (contain API keys)
+db_info.py
+
 db_info.py/
