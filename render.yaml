@@ -1,14 +1,15 @@
 services:
   - type: web
-    name: your-doc-api
+    name: docslore-api
     env: python
-    plan: free
-    pythonVersion: "3.11"
-    buildCommand: "pip install -r requirements.txt"
-    startCommand: "uvicorn main:app --host 0.0.0.0 --port 10000"
-    branch: main
-    autoDeploy: true
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
     envVars:
+      - key: PYTHON_VERSION
+        value: 3.10.18
+      - key: RENDER
+        value: true
       - key: GOOGLE_API_KEY
         sync: false
       - key: PINECONE_API_KEY
@@ -16,4 +17,10 @@ services:
       - key: PINECONE_ENVIRONMENT
         sync: false
       - key: PINECONE_INDEX_NAME
-        sync: false
+        value: hackrx-index
+    healthCheckPath: /docs
+    autoDeploy: true
+    disk:
+      name: cache
+      mountPath: /opt/render/project/src/embedding_cache
+      sizeGB: 1

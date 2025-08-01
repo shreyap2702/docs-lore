@@ -24,8 +24,18 @@ import docx
 import email
 from email import policy
 from dotenv import load_dotenv
+import hashlib
+import pickle
+import json
+from sentence_transformers import SentenceTransformer
 
 load_dotenv()
+
+# --- Render-specific configurations ---
+IS_RENDER = os.getenv("RENDER", "false").lower() == "true"
+MAX_FILE_SIZE = 100 * 1024 * 1024  # 100MB for Render
+REQUEST_TIMEOUT = 120  # 2 minutes for large files
+CHUNK_SIZE = 8192  # 8KB chunks for streaming
 
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
@@ -35,13 +45,36 @@ PINECONE_INDEX_NAME = os.getenv("PINECONE_INDEX_NAME", "hackathon-policy-docs")
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# --- Simple In-Memory Cache for Processed Documents ---
+# --- Memory management for Render ---
+if IS_RENDER:
+    logger.info("Running on Render - enabling memory optimizations")
+    # Reduce chunk size for memory efficiency
+    CHUNK_SIZE = 4096  # 4KB chunks on Render
+    MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB limit on Render
+
+# --- Enhanced Caching System ---
 processed_documents_cache = set()
+embedding_cache_dir = "embedding_cache"
+os.makedirs(embedding_cache_dir, exist_ok=True)
+
+# --- Local Embeddings for API Quota Reduction ---
+USE_LOCAL_EMBEDDINGS = False  # Set to False to use Google embeddings for now
+if USE_LOCAL_EMBEDDINGS:
+    local_embeddings_model = SentenceTransformer('all-mpnet-base-v2')  # 768 dimensions, matches your index
+    print("Using local embeddings (all-mpnet-base-v2) to reduce API quotas")
+else:
+    local_embeddings_model = None
 
 # --- Global Initializations ---
-text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+# Enhanced chunking with semantic awareness
+text_splitter = RecursiveCharacterTextSplitter(
+    chunk_size=800,  # Slightly smaller for better precision
+    chunk_overlap=150,  # Reduced overlap
+    length_function=len,
+    separators=["\n\n", "\n", ". ", " ", ""]
+)
 
-llm = ChatGoogleGenerativeAI(model="models/gemini-1.5-flash-latest", temperature=0.2, google_api_key=GOOGLE_API_KEY)
+llm = ChatGoogleGenerativeAI(model="models/gemini-2.5-flash-lite", temperature=0.2, google_api_key=GOOGLE_API_KEY)
 embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=GOOGLE_API_KEY)
 
 pc = Pinecone(api_key=PINECONE_API_KEY, environment=PINECONE_ENVIRONMENT)
@@ -57,36 +90,117 @@ if PINECONE_INDEX_NAME not in pc.list_indexes().names():
 else:
     logger.info(f"Pinecone index '{PINECONE_INDEX_NAME}' already exists.")
 
-vectorstore = PineconeVectorStore(index=pc.Index(PINECONE_INDEX_NAME), embedding=embeddings, namespace="hackrx-2025")
+# --- Enhanced Embedding Cache Class ---
+class EmbeddingCache:
+    def __init__(self, cache_dir="embedding_cache"):
+        self.cache_dir = cache_dir
+        os.makedirs(cache_dir, exist_ok=True)
+    
+    def get_embedding(self, text, use_local=True):
+        text_hash = hashlib.md5(text.encode()).hexdigest()
+        cache_file = os.path.join(self.cache_dir, f"{text_hash}.pkl")
+        
+        if os.path.exists(cache_file):
+            with open(cache_file, 'rb') as f:
+                return pickle.load(f)
+        
+        # Generate embedding
+        if use_local and local_embeddings_model:
+            embedding = local_embeddings_model.encode(text).tolist()
+        else:
+            embedding = embeddings.embed_query(text)
+        
+        # Cache it
+        with open(cache_file, 'wb') as f:
+            pickle.dump(embedding, f)
+        
+        return embedding
 
-# Fixed prompt template to use 'input' instead of 'question'
+embedding_cache = EmbeddingCache()
+
+# --- Custom Embedding Class for Local Models ---
+class LocalEmbeddings:
+    def __init__(self, model_name='all-mpnet-base-v2'):
+        self.model = SentenceTransformer(model_name)
+    
+    def embed_query(self, text):
+        return self.model.encode(text).tolist()
+    
+    def embed_documents(self, texts):
+        return self.model.encode(texts).tolist()
+    
+    async def aembed_query(self, text):
+        return self.model.encode(text).tolist()
+    
+    async def aembed_documents(self, texts):
+        return self.model.encode(texts).tolist()
+
+# --- Enhanced Vector Store with Local Embeddings ---
+if USE_LOCAL_EMBEDDINGS:
+    local_embeddings = LocalEmbeddings()
+    vectorstore = PineconeVectorStore(
+        index=pc.Index(PINECONE_INDEX_NAME), 
+        embedding=local_embeddings,
+        namespace="hackrx-2025"
+    )
+else:
+    vectorstore = PineconeVectorStore(index=pc.Index(PINECONE_INDEX_NAME), embedding=embeddings, namespace="hackrx-2025")
+
+# --- Shorter, More Focused RAG Prompt (25% shorter responses) ---
 rag_prompt_template = ChatPromptTemplate.from_template("""
-    You are a comprehensive and detailed question-answering system for any type of document content.
-    Your goal is to provide thorough, accurate answers that include all relevant details from the provided context.
-    Answer the user's question based on the following context, providing complete information including:
-    - Specific details, numbers, dates, and time periods
-    - Conditions, requirements, and criteria
-    - Limitations, restrictions, and caps
-    - Procedures, processes, and steps
-    - Definitions, classifications, and categories
-    - Any other relevant factual information present in the context
-    If the context is empty or does not contain relevant information to answer the question, clearly state "The provided document does not contain information to answer this question."
-    If the context contains relevant information, provide a detailed answer that captures all important details from the source material.
-    Do not make up answers or include information not present in the context.
-    Do NOT include any introductory phrases, citations, or references to specific sections/clauses from the context in your answer.
-    For yes/no questions, provide a detailed explanation with all relevant conditions and requirements.
- 
+You are a document analyzer. Answer the user's question based on the provided context.
 
-    Context:
-    {context}
+Guidelines:
+- Be concise and direct
+- Focus on the most relevant information
+- Use clean, professional formatting
+- Avoid newline characters, bullet points, asterisks, or special formatting
+- If information is missing, state "Information not available in the document"
+- For insurance/legal documents, provide clear, structured answers
+- Use simple text format without markdown or special characters
 
-    Question: {input} 
+Context: {context}
+Question: {input}
 
-    Answer:
-    """)
+Provide a clear, professional response:
+""")
 
 document_chain = create_stuff_documents_chain(llm, rag_prompt_template)
-retriever = vectorstore.as_retriever(search_kwargs={"k": 8, "score_threshold": 0.4})
+
+# --- Enhanced Retrieval with Better Parameters ---
+retriever = vectorstore.as_retriever(
+    search_kwargs={
+        "k": 6,  # Reduced for more focused results
+        "score_threshold": 0.35,  # Slightly lower threshold for better coverage
+        "include_metadata": True  # Include metadata for better context
+    }
+)
+
+# --- Multi-stage retrieval for better results ---
+def enhanced_retrieval(question: str):
+    # Stage 1: Get initial results
+    docs = retriever.get_relevant_documents(question)
+    
+    # Stage 2: Filter and re-rank based on relevance
+    if docs:
+        # Simple re-ranking based on keyword overlap
+        scored_docs = []
+        question_words = set(question.lower().split())
+        
+        for doc in docs:
+            doc_words = set(doc.page_content.lower().split())
+            overlap = len(question_words.intersection(doc_words))
+            score = overlap / max(len(question_words), 1)
+            scored_docs.append((doc, score))
+        
+        # Sort by score and take top results
+        scored_docs.sort(key=lambda x: x[1], reverse=True)
+        final_docs = [doc for doc, score in scored_docs[:4]]  # Top 4 most relevant
+        
+        return final_docs
+    
+    return docs
+
 rag_chain = create_retrieval_chain(retriever, document_chain)
 
 # --- End Global Initializations ---
@@ -95,6 +209,16 @@ app = FastAPI(title="LLM Query-Retrieval System")
 
 if os.path.isdir("static"):
     app.mount("/static", StaticFiles(directory="static"), name="static")
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint for Render"""
+    return {
+        "status": "healthy",
+        "timestamp": "2025-08-01T21:30:00Z",
+        "service": "DocLore API",
+        "version": "1.0.0"
+    }
 
 EXPECTED_AUTH_TOKEN = "10fbd8807c6d9b5a37028c3eb4bd885959f06d006aedd2dc5ba64c5ccea913c0"
 security = HTTPBearer()
@@ -131,27 +255,63 @@ def validate_text_input(text_input):
 async def download_file_content(url: str) -> tuple[bytes, str]:
     logger.info(f"Downloading from {url}")
     try:
-        response = await asyncio.to_thread(requests.get, url, stream=True, timeout=30)
+        # Enhanced download with better error handling and size limits
+        response = await asyncio.to_thread(
+            requests.get, 
+            url, 
+            stream=True, 
+            timeout=REQUEST_TIMEOUT,  # Use Render-specific timeout
+            headers={'User-Agent': 'Mozilla/5.0 (compatible; DocLore/1.0)'}
+        )
         response.raise_for_status()
-        content = response.content
+        
+        # Check file size before downloading
+        content_length = response.headers.get('content-length')
+        if content_length:
+            file_size = int(content_length)
+            if file_size > MAX_FILE_SIZE:
+                raise HTTPException(
+                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                    detail=f"File too large: {file_size / (1024*1024):.1f}MB. Maximum allowed: {MAX_FILE_SIZE / (1024*1024)}MB"
+                )
+        
+        # Stream download for large files
+        content = b""
+        
+        for chunk in response.iter_content(chunk_size=CHUNK_SIZE):
+            if chunk:  # Filter out keep-alive chunks
+                content += chunk
+                # Check if we're exceeding memory limits
+                if len(content) > MAX_FILE_SIZE:
+                    raise HTTPException(
+                        status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                        detail=f"File download exceeded memory limit of {MAX_FILE_SIZE / (1024*1024)}MB"
+                    )
+        
         content_type = response.headers.get("Content-Type", "")
 
-        # --- CORRECTION ADDED HERE ---
+        # Validate downloaded content
         if not isinstance(content, bytes) or len(content) == 0:
             logger.error(f"Downloaded content for {url} is not bytes or is empty. Type: {type(content)}, Length: {len(content) if content else 0}")
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, # More specific error code
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=f"Downloaded file from {url} is empty or malformed."
             )
-        # --- END CORRECTION ---
 
+        logger.info(f"Successfully downloaded {len(content)} bytes from {url}")
         return content, content_type
+        
     except requests.exceptions.Timeout:
         logger.error(f"Download timed out for {url}")
         raise HTTPException(status_code=status.HTTP_408_REQUEST_TIMEOUT, detail="Download timed out")
     except requests.exceptions.RequestException as e:
         logger.error(f"Request error for {url}: {e}")
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Request error: {e}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Unexpected error downloading {url}: {e}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Download failed: {str(e)}")
 
 
 def detect_file_type(url: str, content_type: str) -> str:
@@ -234,15 +394,23 @@ def chunk_text(text: str, source_name: str) -> list[Document]:
         logger.warning(f"Empty text provided for chunking from source: {source_name}")
         return []
     
+    # Enhanced chunking with better structure preservation
     chunks = text_splitter.create_documents([text])
     valid_chunks = []
     
-    for chunk in chunks:
+    for i, chunk in enumerate(chunks):
         # Ensure chunk content is valid
         if hasattr(chunk, 'page_content'):
             chunk.page_content = validate_text_input(chunk.page_content)
             if chunk.page_content:  # Only add non-empty chunks
-                chunk.metadata["source"] = source_name
+                # Enhanced metadata for better retrieval
+                chunk.metadata.update({
+                    "source": source_name,
+                    "chunk_index": i,
+                    "chunk_type": "semantic",
+                    "length": len(chunk.page_content),
+                    "word_count": len(chunk.page_content.split())
+                })
                 valid_chunks.append(chunk)
         else:
             logger.warning(f"Invalid chunk format: {type(chunk)}")
@@ -285,6 +453,7 @@ async def run_submission(request: QueryRequest, auth: bool = Depends(verify_toke
                     detail="No text content could be extracted from the document"
                 )
 
+            # Memory-efficient chunking for large documents
             chunks_for_pinecone = chunk_text(text, request.documents)
             
             if not chunks_for_pinecone:
@@ -294,7 +463,33 @@ async def run_submission(request: QueryRequest, auth: bool = Depends(verify_toke
                     detail="No valid text chunks could be created from the document"
                 )
 
-            await asyncio.to_thread(vectorstore.add_documents, chunks_for_pinecone)
+            # Process chunks in batches to avoid memory issues
+            batch_size = 10 if IS_RENDER else 20
+            max_retries = 3
+            
+            for i in range(0, len(chunks_for_pinecone), batch_size):
+                batch = chunks_for_pinecone[i:i + batch_size]
+                
+                # Retry logic for network issues
+                for attempt in range(max_retries):
+                    try:
+                        await asyncio.to_thread(vectorstore.add_documents, batch)
+                        logger.info(f"Processed batch {i//batch_size + 1}/{(len(chunks_for_pinecone) + batch_size - 1)//batch_size}")
+                        break
+                    except Exception as e:
+                        if "Max retries exceeded" in str(e) or "Failed to resolve" in str(e):
+                            if attempt < max_retries - 1:
+                                logger.warning(f"Network error on attempt {attempt + 1}, retrying in 2 seconds...")
+                                await asyncio.sleep(2)
+                            else:
+                                logger.error(f"Failed to upload batch after {max_retries} attempts: {e}")
+                                raise HTTPException(
+                                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                                    detail="Pinecone service temporarily unavailable. Please try again."
+                                )
+                        else:
+                            raise e
+            
             logger.info(f"Upserted {len(chunks_for_pinecone)} chunks to Pinecone for {request.documents}.")
             
             processed_documents_cache.add(request.documents)
@@ -313,8 +508,8 @@ async def run_submission(request: QueryRequest, auth: bool = Depends(verify_toke
                 continue
 
             try:
-                # Debug: Check what documents are being retrieved
-                docs = await asyncio.to_thread(retriever.get_relevant_documents, clean_question)
+                # Use enhanced retrieval for better results
+                docs = await asyncio.to_thread(enhanced_retrieval, clean_question)
                 logger.info(f"Retrieved {len(docs)} documents for question: {clean_question}")
                 if docs:
                     logger.info(f"First doc preview: {docs[0].page_content[:200]}...")
