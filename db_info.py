@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Get API key from environment or use the one from your main.py
-api_key = os.getenv("PINECONE_API_KEY", "pcsk_834Ln_5jdFmw979d5GPxZ4mjwG9sCy4xGqAqoi5WfUZfyTyT1mm58hGucDfQ2xsCHsWs2")
+api_key = os.getenv("PINECONE_API_KEY")
 environment = os.getenv("PINECONE_ENVIRONMENT", "gcp-starter")
 
 pc = Pinecone(api_key=api_key)
