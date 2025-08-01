@@ -108,3 +108,5 @@ logs/
 # Temporary files
 *.tmp
 *.temp
+
+db_info.py/
