@@ -1,62 +1,110 @@
-# Python
+# Environment variables
+.env
+.env.local
+.env.production
+
+# Embedding cache directory
+embedding_cache/
+*.pkl
+
+# Python cache
 __pycache__/
 *.py[cod]
-*.egg-info/
-*.egg
-*.pyo
-*.pyd
+*$py.class
+*.so
 
-# Env files
-.env
-.env.*
-
-# VS Code
-.vscode/
-
-# Mac OS
-.DS_Store
-
-# Virtual environments
-venv/
-.venv/
-env/
-ENV/
-
-# Logs
-*.log
-
-# Render build cache
-.render/
-
-# Byte-compiled files
-*.pyc
-
-# Jupyter Notebook checkpoints (if any)
-.ipynb_checkpoints/
-
-# Cache and compiled output
-.cache/
+# Distribution / packaging
+.Python
 build/
+develop-eggs/
 dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
 
-# Pytest
-.cache/
+# PyInstaller
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
 .pytest_cache/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# pyenv
+.python-version
+
+# celery beat schedule file
+celerybeat-schedule
+
+# SageMath parsed files
+*.sage.py
+
+# Environments
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Spyder project settings
+.spyderproject
+.spyproject
+
+# Rope project settings
+.ropeproject
+
+# mkdocs documentation
+/site
 
 # mypy
 .mypy_cache/
+.dmypy.json
+dmypy.json
 
-# Coverage reports
-htmlcov/
-coverage.xml
-*.cover
-*.py,cover
-.cache/
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
 
-# FAISS, Chroma or Pinecone index files (if stored locally)
-index/
-*.faiss
-*.chroma
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
 
-# Node (if frontend is present in same repo)
-node_modules/
+# Logs
+*.log
+logs/
+
+# Temporary files
+*.tmp
+*.temp
