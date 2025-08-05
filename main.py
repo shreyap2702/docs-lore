@@ -1,4 +1,6 @@
+import gc
 from fastapi import FastAPI, Depends, HTTPException, status
+import psutil
 from pydantic import BaseModel
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.staticfiles import StaticFiles
@@ -250,6 +252,14 @@ def validate_text_input(text_input):
     if not isinstance(text_input, str):
         text_input = str(text_input)
     return text_input.strip()
+
+def log_memory_usage(operation):
+    """Log memory usage for monitoring"""
+    try:
+        memory_mb = psutil.Process().memory_info().rss / 1024 / 1024
+        logger.info(f"Memory after {operation}: {memory_mb:.2f} MB")
+    except Exception as e:
+        logger.warning(f"Could not log memory usage: {e}")
 
 
 async def download_file_content(url: str) -> tuple[bytes, str]:
