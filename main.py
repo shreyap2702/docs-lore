@@ -261,6 +261,85 @@ def log_memory_usage(operation):
     except Exception as e:
         logger.warning(f"Could not log memory usage: {e}")
 
+def check_memory_limit():
+    """Memory circuit breaker - prevents crashes on Render"""
+    try:
+        memory_mb = psutil.Process().memory_info().rss / 1024 / 1024
+        if memory_mb > 450:  # 88% of 512MB limit
+            logger.error(f"CRITICAL MEMORY: {memory_mb}MB - Aborting request")
+            gc.collect()
+            raise HTTPException(status_code=503, detail="Service temporarily overloaded")
+        return memory_mb
+    except Exception as e:
+        logger.warning(f"Could not check memory: {e}")
+        return 0
+
+def emergency_cleanup():
+    """Aggressive memory cleanup when approaching limits"""
+    try:
+        # Force garbage collection multiple times
+        for i in range(3):
+            collected = gc.collect()
+            logger.info(f"Emergency cleanup round {i+1}: collected {collected} objects")
+    except Exception as e:
+        logger.warning(f"Emergency cleanup failed: {e}")
+
+def safe_memory_check(operation="operation"):
+    """Safe memory check with automatic cleanup"""
+    try:
+        memory_mb = psutil.Process().memory_info().rss / 1024 / 1024
+        logger.info(f"Memory after {operation}: {memory_mb:.2f} MB")
+        
+        if memory_mb > 450:
+            logger.error(f"CRITICAL: {memory_mb}MB - Aborting")
+            emergency_cleanup()
+            raise HTTPException(status_code=503, detail="Memory limit exceeded")
+        
+        if memory_mb > 400:
+            logger.warning(f"HIGH MEMORY: {memory_mb}MB - Forcing cleanup")
+            emergency_cleanup()
+            
+        return memory_mb
+    except Exception as e:
+        logger.warning(f"Memory check failed: {e}")
+        return 0
+
+def get_dynamic_batch_size():
+    """Adjust batch size based on current memory"""
+    try:
+        memory_mb = psutil.Process().memory_info().rss / 1024 / 1024
+        
+        if memory_mb > 400:
+            return 2  # Very small batches
+        elif memory_mb > 350:
+            return 3  # Small batches
+        else:
+            return 5  # Normal batches
+    except Exception as e:
+        logger.warning(f"Could not get dynamic batch size: {e}")
+        return 3  # Default to small batches
+
+def validate_document_size(file_bytes, doc_url):
+    """Check if document can be processed safely"""
+    try:
+        file_size_mb = len(file_bytes) / (1024 * 1024)
+        current_memory = psutil.Process().memory_info().rss / 1024 / 1024
+        
+        # Conservative estimate: document expands 6-10x in memory
+        estimated_memory = file_size_mb * 10
+        available_memory = 512 - current_memory  # Render limit
+        
+        if estimated_memory > available_memory:
+            raise HTTPException(
+                status_code=413, 
+                detail=f"Document too large ({file_size_mb:.1f}MB) for current memory state. Try again later."
+            )
+            
+        logger.info(f"Document size: {file_size_mb:.1f}MB, Estimated memory: {estimated_memory:.1f}MB, Available: {available_memory:.1f}MB")
+        
+    except Exception as e:
+        logger.warning(f"Document size validation failed: {e}")
+
 
 async def download_file_content(url: str) -> tuple[bytes, str]:
     logger.info(f"Downloading from {url}")
@@ -434,11 +513,18 @@ async def run_submission(request: QueryRequest, auth: bool = Depends(verify_toke
     logger.info(f"Received request for document: {request.documents}")
     logger.info(f"Questions: {request.questions}")
 
+    # Initial memory check - fail fast if already high
+    initial_memory = check_memory_limit()
+    logger.info(f"Initial memory: {initial_memory:.2f}MB")
+
     try:
         if request.documents not in processed_documents_cache:
             logger.info(f"Document {request.documents} not in cache. Proceeding with ingestion.")
 
             file_bytes, content_type = await download_file_content(request.documents)
+            
+            # Validate document size for memory safety
+            validate_document_size(file_bytes, request.documents)
             
             file_type = detect_file_type(request.documents, content_type)
             logger.info(f"DEBUG: Before parsing - file_bytes type: {type(file_bytes)}")
@@ -478,9 +564,11 @@ async def run_submission(request: QueryRequest, auth: bool = Depends(verify_toke
                     detail="No valid text chunks could be created from the document"
                 )
 
-            # Process chunks in smaller batches to avoid memory issues
-            batch_size = 3 if IS_RENDER else 5  # Reduced batch size for memory optimization
+            # Process chunks with dynamic batch sizing based on memory
+            batch_size = get_dynamic_batch_size()
             max_retries = 3
+            
+            logger.info(f"Using dynamic batch size: {batch_size} (memory-based)")
             
             for i in range(0, len(chunks_for_pinecone), batch_size):
                 batch = chunks_for_pinecone[i:i + batch_size]
@@ -494,7 +582,7 @@ async def run_submission(request: QueryRequest, auth: bool = Depends(verify_toke
                         # Memory cleanup after each batch
                         del batch
                         gc.collect()
-                        log_memory_usage(f"batch {i//batch_size + 1}")
+                        safe_memory_check(f"batch {i//batch_size + 1}")
                         break
                     except Exception as e:
                         if "Max retries exceeded" in str(e) or "Failed to resolve" in str(e):
@@ -513,7 +601,7 @@ async def run_submission(request: QueryRequest, auth: bool = Depends(verify_toke
             # Final memory cleanup
             del chunks_for_pinecone
             gc.collect()
-            log_memory_usage("document processing complete")
+            safe_memory_check("document processing complete")
             logger.info(f"Upserted chunks to Pinecone for {request.documents}.")
             
             processed_documents_cache.add(request.documents)
@@ -523,6 +611,14 @@ async def run_submission(request: QueryRequest, auth: bool = Depends(verify_toke
         answers = []
         for i, question in enumerate(request.questions):
             logger.info(f"Answering question {i+1}/{len(request.questions)}: {question}")
+
+            # Check memory before each question - stop if too high
+            if i > 0:  # Skip check for first question
+                current_memory = check_memory_limit()
+                if current_memory > 400 and i > 2:  # If high memory and processed some questions
+                    logger.warning(f"Stopping at question {i+1} due to memory constraints ({current_memory:.1f}MB)")
+                    answers.append("Processing stopped due to memory constraints. Please try with fewer questions.")
+                    break
 
             # Validate question input
             clean_question = validate_text_input(question)
@@ -546,7 +642,7 @@ async def run_submission(request: QueryRequest, auth: bool = Depends(verify_toke
                 # Aggressive memory cleanup after each question
                 del docs, result, answer
                 gc.collect()
-                log_memory_usage(f"question {i+1} processing")
+                safe_memory_check(f"question {i+1} processing")
                 
             except Exception as e:
                 logger.error(f"Error processing question '{question}': {e}")
