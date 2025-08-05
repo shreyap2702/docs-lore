@@ -179,7 +179,7 @@ retriever = vectorstore.as_retriever(
 # --- Multi-stage retrieval for better results ---
 def enhanced_retrieval(question: str):
     # Stage 1: Get initial results
-    docs = retriever.get_relevant_documents(question)
+    docs = retriever.invoke(question)  # Fixed: Using .invoke() instead of deprecated .get_relevant_documents()
     
     # Stage 2: Filter and re-rank based on relevance
     if docs:
@@ -445,6 +445,11 @@ async def run_submission(request: QueryRequest, auth: bool = Depends(verify_toke
             else:
                 logger.warning(f"Unsupported document type detected: {file_type} for URL {request.documents}")
                 raise HTTPException(status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail=f"Unsupported document type: {file_type}")
+            
+            # Memory cleanup after parsing
+            del file_bytes
+            gc.collect()
+            log_memory_usage("document parsing")
 
             if not text.strip():
                 logger.error(f"No text extracted from document: {request.documents}")
@@ -463,8 +468,8 @@ async def run_submission(request: QueryRequest, auth: bool = Depends(verify_toke
                     detail="No valid text chunks could be created from the document"
                 )
 
-            # Process chunks in batches to avoid memory issues
-            batch_size = 10 if IS_RENDER else 20
+            # Process chunks in smaller batches to avoid memory issues
+            batch_size = 3 if IS_RENDER else 5  # Reduced batch size for memory optimization
             max_retries = 3
             
             for i in range(0, len(chunks_for_pinecone), batch_size):
@@ -475,6 +480,11 @@ async def run_submission(request: QueryRequest, auth: bool = Depends(verify_toke
                     try:
                         await asyncio.to_thread(vectorstore.add_documents, batch)
                         logger.info(f"Processed batch {i//batch_size + 1}/{(len(chunks_for_pinecone) + batch_size - 1)//batch_size}")
+                        
+                        # Memory cleanup after each batch
+                        del batch
+                        gc.collect()
+                        log_memory_usage(f"batch {i//batch_size + 1}")
                         break
                     except Exception as e:
                         if "Max retries exceeded" in str(e) or "Failed to resolve" in str(e):
@@ -490,17 +500,21 @@ async def run_submission(request: QueryRequest, auth: bool = Depends(verify_toke
                         else:
                             raise e
             
-            logger.info(f"Upserted {len(chunks_for_pinecone)} chunks to Pinecone for {request.documents}.")
+            # Final memory cleanup
+            del chunks_for_pinecone
+            gc.collect()
+            log_memory_usage("document processing complete")
+            logger.info(f"Upserted chunks to Pinecone for {request.documents}.")
             
             processed_documents_cache.add(request.documents)
         else:
             logger.info(f"Document {request.documents} found in cache. Skipping ingestion steps.")
 
         answers = []
-        for question in request.questions:
-            logger.info(f"Answering question: {question}")
+        for i, question in enumerate(request.questions):
+            logger.info(f"Answering question {i+1}/{len(request.questions)}: {question}")
 
-    # Validate question input
+            # Validate question input
             clean_question = validate_text_input(question)
             if not clean_question:
                 logger.warning(f"Empty or invalid question: {question}")
@@ -518,6 +532,12 @@ async def run_submission(request: QueryRequest, auth: bool = Depends(verify_toke
                 answer = result.get("answer", "No answer found")  # Extract the 'answer' key from the result dict
                 answers.append(answer)
                 logger.info(f"Generated answer for '{question}': {answer[:100]}...")
+                
+                # Aggressive memory cleanup after each question
+                del docs, result, answer
+                gc.collect()
+                log_memory_usage(f"question {i+1} processing")
+                
             except Exception as e:
                 logger.error(f"Error processing question '{question}': {e}")
                 answers.append(f"Error processing question: {str(e)}")
