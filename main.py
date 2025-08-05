@@ -330,15 +330,210 @@ def validate_document_size(file_bytes, doc_url):
         available_memory = 512 - current_memory  # Render limit
         
         if estimated_memory > available_memory:
-            raise HTTPException(
-                status_code=413, 
-                detail=f"Document too large ({file_size_mb:.1f}MB) for current memory state. Try again later."
-            )
+            logger.warning(f"Large document detected: {file_size_mb:.1f}MB - will use chunked processing")
+            return False  # Signal to use chunked processing
             
         logger.info(f"Document size: {file_size_mb:.1f}MB, Estimated memory: {estimated_memory:.1f}MB, Available: {available_memory:.1f}MB")
+        return True  # Safe to process normally
         
     except Exception as e:
         logger.warning(f"Document size validation failed: {e}")
+        return True  # Default to normal processing
+
+async def process_large_document_chunked(file_bytes: bytes, file_type: str) -> str:
+    """Process large documents in chunks to avoid memory limits"""
+    try:
+        logger.info(f"Starting chunked processing for {file_type} document")
+        
+        if file_type == "pdf":
+            return await parse_pdf_chunked(file_bytes)
+        elif file_type == "docx":
+            return await parse_docx_chunked(file_bytes)
+        elif file_type == "eml":
+            return await parse_email_chunked(file_bytes)
+        else:
+            raise HTTPException(status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail=f"Unsupported document type: {file_type}")
+            
+    except Exception as e:
+        logger.error(f"Chunked processing failed: {e}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to process large document: {str(e)}")
+
+async def parse_pdf_chunked(data: bytes) -> str:
+    """Parse PDF in chunks to avoid memory limits"""
+    logger.info("Starting chunked PDF parsing")
+    
+    try:
+        reader = await asyncio.to_thread(PdfReader, io.BytesIO(data))
+        text_parts = []
+        
+        # Process pages in smaller batches
+        page_batch_size = 10  # Process 10 pages at a time
+        total_pages = len(reader.pages)
+        
+        for batch_start in range(0, total_pages, page_batch_size):
+            batch_end = min(batch_start + page_batch_size, total_pages)
+            batch_pages = reader.pages[batch_start:batch_end]
+            
+            logger.info(f"Processing PDF pages {batch_start+1}-{batch_end} of {total_pages}")
+            
+            for page in batch_pages:
+                page_text = await asyncio.to_thread(page.extract_text)
+                if page_text:
+                    text_parts.append(page_text.strip())
+            
+            # Memory cleanup after each batch
+            del batch_pages
+            gc.collect()
+            safe_memory_check(f"PDF batch {batch_start//page_batch_size + 1}")
+        
+        text = "\n".join(text_parts)
+        text = validate_text_input(text)
+        
+        # Final cleanup
+        del reader, text_parts
+        gc.collect()
+        safe_memory_check("PDF chunked parsing complete")
+        
+        logger.info(f"Successfully parsed PDF in chunks. Extracted {len(text)} characters.")
+        return text
+        
+    except Exception as e:
+        logger.error(f"Chunked PDF parsing error: {e}", exc_info=True)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"PDF parsing error: {e}")
+
+async def parse_docx_chunked(data: bytes) -> str:
+    """Parse DOCX in chunks to avoid memory limits"""
+    logger.info("Starting chunked DOCX parsing")
+    
+    try:
+        doc = await asyncio.to_thread(docx.Document, io.BytesIO(data))
+        text_parts = []
+        
+        # Process paragraphs in batches
+        para_batch_size = 50  # Process 50 paragraphs at a time
+        total_paragraphs = len(doc.paragraphs)
+        
+        for batch_start in range(0, total_paragraphs, para_batch_size):
+            batch_end = min(batch_start + para_batch_size, total_paragraphs)
+            batch_paragraphs = doc.paragraphs[batch_start:batch_end]
+            
+            logger.info(f"Processing DOCX paragraphs {batch_start+1}-{batch_end} of {total_paragraphs}")
+            
+            for para in batch_paragraphs:
+                if para.text.strip():
+                    text_parts.append(para.text.strip())
+            
+            # Memory cleanup after each batch
+            del batch_paragraphs
+            gc.collect()
+            safe_memory_check(f"DOCX batch {batch_start//para_batch_size + 1}")
+        
+        text = "\n".join(text_parts)
+        text = validate_text_input(text)
+        
+        # Final cleanup
+        del doc, text_parts
+        gc.collect()
+        safe_memory_check("DOCX chunked parsing complete")
+        
+        logger.info(f"Successfully parsed DOCX in chunks. Extracted {len(text)} characters.")
+        return text
+        
+    except Exception as e:
+        logger.error(f"Chunked DOCX parsing error: {e}", exc_info=True)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"DOCX parsing error: {e}")
+
+async def parse_email_chunked(data: bytes) -> str:
+    """Parse email in chunks to avoid memory limits"""
+    logger.info("Starting chunked email parsing")
+    
+    try:
+        msg = await asyncio.to_thread(email.message_from_bytes, data, policy=policy.default)
+        main_body = msg.get_body()
+        text_parts = []
+        
+        if main_body:
+            # Process email parts in smaller chunks
+            parts = list(main_body.iter_attachments())
+            part_batch_size = 5  # Process 5 parts at a time
+            
+            for batch_start in range(0, len(parts), part_batch_size):
+                batch_end = min(batch_start + part_batch_size, len(parts))
+                batch_parts = parts[batch_start:batch_end]
+                
+                logger.info(f"Processing email parts {batch_start+1}-{batch_end} of {len(parts)}")
+                
+                for part in batch_parts:
+                    if part.get_content_type() == 'text/plain':
+                        part_text = part.get_content()
+                        if part_text:
+                            text_parts.append(part_text)
+                
+                # Memory cleanup after each batch
+                del batch_parts
+                gc.collect()
+                safe_memory_check(f"Email batch {batch_start//part_batch_size + 1}")
+            
+            # Handle main body content
+            if main_body.get_content_type() == 'text/plain':
+                main_text = main_body.get_content()
+                if main_text:
+                    text_parts.append(main_text)
+        
+        text = "\n".join(text_parts)
+        text = validate_text_input(text)
+        
+        # Final cleanup
+        del msg, main_body, text_parts
+        gc.collect()
+        safe_memory_check("Email chunked parsing complete")
+        
+        logger.info(f"Successfully parsed email in chunks. Extracted {len(text)} characters.")
+        return text
+        
+    except Exception as e:
+        logger.error(f"Chunked email parsing error: {e}", exc_info=True)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Email parsing error: {e}")
+
+
+def process_document_in_chunks(text: str, source_name: str, chunk_size_chars: int = 50000):
+    """Process large documents in smaller chunks to avoid memory issues"""
+    try:
+        logger.info(f"Processing large document in chunks: {len(text)} characters")
+        
+        # Split text into manageable chunks
+        text_chunks = []
+        for i in range(0, len(text), chunk_size_chars):
+            chunk_text = text[i:i + chunk_size_chars]
+            text_chunks.append(chunk_text)
+        
+        logger.info(f"Split document into {len(text_chunks)} chunks")
+        
+        all_chunks = []
+        for i, chunk_text in enumerate(text_chunks):
+            # Process each chunk separately
+            chunks = chunk_text(chunk_text, f"{source_name}_chunk_{i}")
+            all_chunks.extend(chunks)
+            
+            # Memory cleanup after each chunk
+            del chunks
+            gc.collect()
+            safe_memory_check(f"chunk {i+1} processing")
+            
+            # Stop if memory is getting too high
+            if check_memory_limit() > 400:
+                logger.warning(f"Stopping chunk processing at chunk {i+1} due to memory constraints")
+                break
+        
+        logger.info(f"Successfully processed {len(all_chunks)} total chunks")
+        return all_chunks
+        
+    except Exception as e:
+        logger.error(f"Chunked processing failed: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to process large document"
+        )
 
 
 async def download_file_content(url: str) -> tuple[bytes, str]:
@@ -364,17 +559,30 @@ async def download_file_content(url: str) -> tuple[bytes, str]:
                     detail=f"File too large: {file_size / (1024*1024):.1f}MB. Maximum allowed: {MAX_FILE_SIZE / (1024*1024)}MB"
                 )
         
-        # Stream download for large files
+        # Stream download for large files with memory monitoring
         content = b""
+        chunk_count = 0
         
         for chunk in response.iter_content(chunk_size=CHUNK_SIZE):
             if chunk:  # Filter out keep-alive chunks
                 content += chunk
-                # Check if we're exceeding memory limits
+                chunk_count += 1
+                
+                # Check memory every 10 chunks to avoid excessive checking
+                if chunk_count % 10 == 0:
+                    current_memory = psutil.Process().memory_info().rss / 1024 / 1024
+                    if current_memory > 450:  # Critical memory limit
+                        logger.error(f"Memory limit reached during download: {current_memory:.1f}MB")
+                        raise HTTPException(
+                            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                            detail="Service temporarily overloaded during download"
+                        )
+                
+                # Check if we're exceeding file size limits
                 if len(content) > MAX_FILE_SIZE:
                     raise HTTPException(
                         status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                        detail=f"File download exceeded memory limit of {MAX_FILE_SIZE / (1024*1024)}MB"
+                        detail=f"File download exceeded size limit of {MAX_FILE_SIZE / (1024*1024)}MB"
                     )
         
         content_type = response.headers.get("Content-Type", "")
@@ -387,7 +595,7 @@ async def download_file_content(url: str) -> tuple[bytes, str]:
                 detail=f"Downloaded file from {url} is empty or malformed."
             )
 
-        logger.info(f"Successfully downloaded {len(content)} bytes from {url}")
+        logger.info(f"Successfully downloaded {len(content)} bytes from {url} in {chunk_count} chunks")
         return content, content_type
         
     except requests.exceptions.Timeout:
@@ -524,7 +732,7 @@ async def run_submission(request: QueryRequest, auth: bool = Depends(verify_toke
             file_bytes, content_type = await download_file_content(request.documents)
             
             # Validate document size for memory safety
-            validate_document_size(file_bytes, request.documents)
+            can_process_normally = validate_document_size(file_bytes, request.documents)
             
             file_type = detect_file_type(request.documents, content_type)
             logger.info(f"DEBUG: Before parsing - file_bytes type: {type(file_bytes)}")
@@ -532,20 +740,26 @@ async def run_submission(request: QueryRequest, auth: bool = Depends(verify_toke
             logger.info(f"DEBUG: Before parsing - Detected file_type: {file_type}")
             
             text = ""
-            if file_type == "pdf":
-                text = await parse_pdf(file_bytes)
-            elif file_type == "docx":
-                text = await parse_docx(file_bytes)
-            elif file_type == "eml":
-                text = await parse_email(file_bytes)
+            if can_process_normally:
+                # Normal processing for smaller documents
+                if file_type == "pdf":
+                    text = await parse_pdf(file_bytes)
+                elif file_type == "docx":
+                    text = await parse_docx(file_bytes)
+                elif file_type == "eml":
+                    text = await parse_email(file_bytes)
+                else:
+                    logger.warning(f"Unsupported document type detected: {file_type} for URL {request.documents}")
+                    raise HTTPException(status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail=f"Unsupported document type: {file_type}")
+                
+                # Memory cleanup after parsing
+                del file_bytes
+                gc.collect()
+                safe_memory_check("document parsing")
             else:
-                logger.warning(f"Unsupported document type detected: {file_type} for URL {request.documents}")
-                raise HTTPException(status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail=f"Unsupported document type: {file_type}")
-            
-            # Memory cleanup after parsing
-            del file_bytes
-            gc.collect()
-            log_memory_usage("document parsing")
+                # Chunked processing for large documents
+                logger.info("Using chunked processing for large document")
+                text = await process_large_document_chunked(file_bytes, file_type)
 
             if not text.strip():
                 logger.error(f"No text extracted from document: {request.documents}")
