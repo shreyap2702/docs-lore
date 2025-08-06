@@ -32,6 +32,9 @@ import json
 from sentence_transformers import SentenceTransformer
 import tempfile
 from pdfminer.high_level import extract_text as pdfminer_extract_text
+import pymupdf as fitz  # More memory-efficient than pypdf
+from contextlib import contextmanager
+from typing import List
 
 load_dotenv()
 
@@ -747,6 +750,40 @@ def chunk_text(text: str, source_name: str) -> list[Document]:
     return valid_chunks
 
 
+async def process_pdf_memory_efficient(url: str, source_name: str) -> list[Document]:
+    """Process a PDF file efficiently, streaming and chunking."""
+    logger.info(f"Processing PDF from URL: {url}")
+    
+    try:
+        # Download the PDF
+        file_bytes, content_type = await download_file_content(url)
+        file_type = detect_file_type(url, content_type)
+        
+        # Validate document size
+        can_process_normally = validate_document_size(file_bytes, url)
+        
+        if not can_process_normally:
+            logger.info("Using chunked processing for large PDF.")
+            text = await process_large_document_chunked(file_bytes, file_type)
+        else:
+            text = await parse_pdf(file_bytes)
+        
+        # Chunk the text
+        chunks = chunk_text(text, source_name)
+        
+        # Final cleanup
+        del file_bytes
+        gc.collect()
+        safe_memory_check("PDF memory efficient processing complete")
+        
+        logger.info(f"Successfully processed PDF from {url}. Extracted {len(text)} characters.")
+        return chunks
+        
+    except Exception as e:
+        logger.error(f"Memory efficient PDF processing failed: {e}", exc_info=True)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to process PDF efficiently: {e}")
+
+
 @app.post("/api/v1/hackrx/run", response_model=QueryResponse)
 async def run_submission(request: QueryRequest, auth: bool = Depends(verify_token)):
     logger.info(f"Received request for document: {request.documents}")
@@ -760,18 +797,9 @@ async def run_submission(request: QueryRequest, auth: bool = Depends(verify_toke
         if request.documents not in processed_documents_cache:
             logger.info(f"Document {request.documents} not in cache. Proceeding with ingestion.")
 
-            file_type = detect_file_type(request.documents, "application/pdf")  # Only for PDF streaming
+            file_type = detect_file_type(request.documents, "application/pdf")
             if file_type == "pdf":
-                # Use streaming for all PDFs (or add logic for large PDFs only)
-                pdf_path = await asyncio.to_thread(stream_pdf_to_tempfile, request.documents)
-                text = await asyncio.to_thread(extract_text_from_pdf_file, pdf_path)
-                if not text.strip():
-                    logger.error(f"No text extracted from document: {request.documents}")
-                    raise HTTPException(
-                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                        detail="No text content could be extracted from the document"
-                    )
-                chunks_for_pinecone = chunk_text(text, request.documents)
+                chunks_for_pinecone = await process_pdf_memory_efficient(request.documents, request.documents)
                 if not chunks_for_pinecone:
                     logger.error(f"No valid chunks created from document: {request.documents}")
                     raise HTTPException(
