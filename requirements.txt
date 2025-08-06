@@ -28,6 +28,7 @@ faiss-cpu==1.11.0.post1
 
 # === PDF and DOCX loaders
 pypdf==4.0.0
+pdfminer.six==20231228
 python-docx==1.2.0
 
 # === Environment variables

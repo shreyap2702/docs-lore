@@ -30,6 +30,8 @@ import hashlib
 import pickle
 import json
 from sentence_transformers import SentenceTransformer
+import tempfile
+from pdfminer.high_level import extract_text as pdfminer_extract_text
 
 load_dotenv()
 
@@ -496,6 +498,35 @@ async def parse_email_chunked(data: bytes) -> str:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Email parsing error: {e}")
 
 
+def stream_pdf_to_tempfile(pdf_url, chunk_size=1024*1024):
+    """Stream a PDF from a URL to a temporary file on disk."""
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+            with requests.get(pdf_url, stream=True, timeout=REQUEST_TIMEOUT) as r:
+                r.raise_for_status()
+                for chunk in r.iter_content(chunk_size=chunk_size):
+                    if chunk:
+                        tmp_file.write(chunk)
+            return tmp_file.name
+    except Exception as e:
+        logger.error(f"Failed to stream PDF to tempfile: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to stream PDF: {e}")
+
+def extract_text_from_pdf_file(pdf_path):
+    """Extract text from a PDF file using pdfminer.six."""
+    try:
+        text = pdfminer_extract_text(pdf_path)
+        return validate_text_input(text)
+    except Exception as e:
+        logger.error(f"Failed to extract text from PDF file: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to extract text from PDF: {e}")
+    finally:
+        try:
+            os.remove(pdf_path)
+        except Exception as cleanup_err:
+            logger.warning(f"Failed to remove temp PDF file: {cleanup_err}")
+
+
 def process_document_in_chunks(text: str, source_name: str, chunk_size_chars: int = 50000):
     """Process large documents in smaller chunks to avoid memory issues"""
     try:
@@ -729,96 +760,122 @@ async def run_submission(request: QueryRequest, auth: bool = Depends(verify_toke
         if request.documents not in processed_documents_cache:
             logger.info(f"Document {request.documents} not in cache. Proceeding with ingestion.")
 
-            file_bytes, content_type = await download_file_content(request.documents)
-            
-            # Validate document size for memory safety
-            can_process_normally = validate_document_size(file_bytes, request.documents)
-            
-            file_type = detect_file_type(request.documents, content_type)
-            logger.info(f"DEBUG: Before parsing - file_bytes type: {type(file_bytes)}")
-            logger.info(f"DEBUG: Before parsing - file_bytes length: {len(file_bytes)} bytes")
-            logger.info(f"DEBUG: Before parsing - Detected file_type: {file_type}")
-            
-            text = ""
-            if can_process_normally:
-                # Normal processing for smaller documents
-                if file_type == "pdf":
-                    text = await parse_pdf(file_bytes)
-                elif file_type == "docx":
-                    text = await parse_docx(file_bytes)
-                elif file_type == "eml":
-                    text = await parse_email(file_bytes)
-                else:
-                    logger.warning(f"Unsupported document type detected: {file_type} for URL {request.documents}")
-                    raise HTTPException(status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail=f"Unsupported document type: {file_type}")
-                
-                # Memory cleanup after parsing
-                del file_bytes
-                gc.collect()
-                safe_memory_check("document parsing")
-            else:
-                # Chunked processing for large documents
-                logger.info("Using chunked processing for large document")
-                text = await process_large_document_chunked(file_bytes, file_type)
-
-            if not text.strip():
-                logger.error(f"No text extracted from document: {request.documents}")
-                raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    detail="No text content could be extracted from the document"
-                )
-
-            # Memory-efficient chunking for large documents
-            chunks_for_pinecone = chunk_text(text, request.documents)
-            
-            if not chunks_for_pinecone:
-                logger.error(f"No valid chunks created from document: {request.documents}")
-                raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    detail="No valid text chunks could be created from the document"
-                )
-
-            # Process chunks with dynamic batch sizing based on memory
-            batch_size = get_dynamic_batch_size()
-            max_retries = 3
-            
-            logger.info(f"Using dynamic batch size: {batch_size} (memory-based)")
-            
-            for i in range(0, len(chunks_for_pinecone), batch_size):
-                batch = chunks_for_pinecone[i:i + batch_size]
-                
-                # Retry logic for network issues
-                for attempt in range(max_retries):
-                    try:
-                        await asyncio.to_thread(vectorstore.add_documents, batch)
-                        logger.info(f"Processed batch {i//batch_size + 1}/{(len(chunks_for_pinecone) + batch_size - 1)//batch_size}")
-                        
-                        # Memory cleanup after each batch
-                        del batch
-                        gc.collect()
-                        safe_memory_check(f"batch {i//batch_size + 1}")
-                        break
-                    except Exception as e:
-                        if "Max retries exceeded" in str(e) or "Failed to resolve" in str(e):
-                            if attempt < max_retries - 1:
-                                logger.warning(f"Network error on attempt {attempt + 1}, retrying in 2 seconds...")
-                                await asyncio.sleep(2)
+            file_type = detect_file_type(request.documents, "application/pdf")  # Only for PDF streaming
+            if file_type == "pdf":
+                # Use streaming for all PDFs (or add logic for large PDFs only)
+                pdf_path = await asyncio.to_thread(stream_pdf_to_tempfile, request.documents)
+                text = await asyncio.to_thread(extract_text_from_pdf_file, pdf_path)
+                if not text.strip():
+                    logger.error(f"No text extracted from document: {request.documents}")
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        detail="No text content could be extracted from the document"
+                    )
+                chunks_for_pinecone = chunk_text(text, request.documents)
+                if not chunks_for_pinecone:
+                    logger.error(f"No valid chunks created from document: {request.documents}")
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        detail="No valid text chunks could be created from the document"
+                    )
+                batch_size = get_dynamic_batch_size()
+                max_retries = 3
+                logger.info(f"Using dynamic batch size: {batch_size} (memory-based)")
+                for i in range(0, len(chunks_for_pinecone), batch_size):
+                    batch = chunks_for_pinecone[i:i + batch_size]
+                    for attempt in range(max_retries):
+                        try:
+                            await asyncio.to_thread(vectorstore.add_documents, batch)
+                            logger.info(f"Processed batch {i//batch_size + 1}/{(len(chunks_for_pinecone) + batch_size - 1)//batch_size}")
+                            del batch
+                            gc.collect()
+                            safe_memory_check(f"batch {i//batch_size + 1}")
+                            break
+                        except Exception as e:
+                            if "Max retries exceeded" in str(e) or "Failed to resolve" in str(e):
+                                if attempt < max_retries - 1:
+                                    logger.warning(f"Network error on attempt {attempt + 1}, retrying in 2 seconds...")
+                                    await asyncio.sleep(2)
+                                else:
+                                    logger.error(f"Failed to upload batch after {max_retries} attempts: {e}")
+                                    raise HTTPException(
+                                        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                                        detail="Pinecone service temporarily unavailable. Please try again."
+                                    )
                             else:
-                                logger.error(f"Failed to upload batch after {max_retries} attempts: {e}")
-                                raise HTTPException(
-                                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                                    detail="Pinecone service temporarily unavailable. Please try again."
-                                )
-                        else:
-                            raise e
-            
-            # Final memory cleanup
-            del chunks_for_pinecone
-            gc.collect()
-            safe_memory_check("document processing complete")
-            logger.info(f"Upserted chunks to Pinecone for {request.documents}.")
-            
-            processed_documents_cache.add(request.documents)
+                                raise e
+                del chunks_for_pinecone
+                gc.collect()
+                safe_memory_check("document processing complete")
+                logger.info(f"Upserted chunks to Pinecone for {request.documents}.")
+                processed_documents_cache.add(request.documents)
+            else:
+                # ... existing code for non-PDF documents ...
+                file_bytes, content_type = await download_file_content(request.documents)
+                can_process_normally = validate_document_size(file_bytes, request.documents)
+                file_type = detect_file_type(request.documents, content_type)
+                logger.info(f"DEBUG: Before parsing - file_bytes type: {type(file_bytes)}")
+                logger.info(f"DEBUG: Before parsing - file_bytes length: {len(file_bytes)} bytes")
+                logger.info(f"DEBUG: Before parsing - Detected file_type: {file_type}")
+                text = ""
+                if can_process_normally:
+                    if file_type == "docx":
+                        text = await parse_docx(file_bytes)
+                    elif file_type == "eml":
+                        text = await parse_email(file_bytes)
+                    else:
+                        logger.warning(f"Unsupported document type detected: {file_type} for URL {request.documents}")
+                        raise HTTPException(status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail=f"Unsupported document type: {file_type}")
+                    del file_bytes
+                    gc.collect()
+                    safe_memory_check("document parsing")
+                else:
+                    logger.info("Using chunked processing for large document")
+                    text = await process_large_document_chunked(file_bytes, file_type)
+                if not text.strip():
+                    logger.error(f"No text extracted from document: {request.documents}")
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        detail="No text content could be extracted from the document"
+                    )
+                chunks_for_pinecone = chunk_text(text, request.documents)
+                if not chunks_for_pinecone:
+                    logger.error(f"No valid chunks created from document: {request.documents}")
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        detail="No valid text chunks could be created from the document"
+                    )
+                batch_size = get_dynamic_batch_size()
+                max_retries = 3
+                logger.info(f"Using dynamic batch size: {batch_size} (memory-based)")
+                for i in range(0, len(chunks_for_pinecone), batch_size):
+                    batch = chunks_for_pinecone[i:i + batch_size]
+                    for attempt in range(max_retries):
+                        try:
+                            await asyncio.to_thread(vectorstore.add_documents, batch)
+                            logger.info(f"Processed batch {i//batch_size + 1}/{(len(chunks_for_pinecone) + batch_size - 1)//batch_size}")
+                            del batch
+                            gc.collect()
+                            safe_memory_check(f"batch {i//batch_size + 1}")
+                            break
+                        except Exception as e:
+                            if "Max retries exceeded" in str(e) or "Failed to resolve" in str(e):
+                                if attempt < max_retries - 1:
+                                    logger.warning(f"Network error on attempt {attempt + 1}, retrying in 2 seconds...")
+                                    await asyncio.sleep(2)
+                                else:
+                                    logger.error(f"Failed to upload batch after {max_retries} attempts: {e}")
+                                    raise HTTPException(
+                                        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                                        detail="Pinecone service temporarily unavailable. Please try again."
+                                    )
+                            else:
+                                raise e
+                del chunks_for_pinecone
+                gc.collect()
+                safe_memory_check("document processing complete")
+                logger.info(f"Upserted chunks to Pinecone for {request.documents}.")
+                processed_documents_cache.add(request.documents)
         else:
             logger.info(f"Document {request.documents} found in cache. Skipping ingestion steps.")
 
